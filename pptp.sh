@@ -1,17 +1,28 @@
 #!/bin/bash
 
 # ===================== 配置 =====================
-USERS=19
-USER_BASE="pptp"
 IP_BASE="10.10.10."
 VPN_LOCAL="10.10.10.254"
 VPN_REMOTE="10.10.10.1-253"
 PASSWORD="299792458"
 DNS="8.8.8.8,1.1.1.1"
-PUBLIC_IPS=("1.1.1.1" "8.8.8.8")
 
-# 校验 IP 数量是否足够
-[ ${#PUBLIC_IPS[@]} -lt $USERS ] && { echo "不足的 PUBLIC_IPS"; exit 1; }
+# 从 ip 文件中读取 IP 地址到 PUBLIC_IPS 数组
+if [ ! -f ip ]; then
+    echo "IP 文件不存在"
+    exit 1
+fi
+mapfile -t PUBLIC_IPS < ip
+
+# 根据 ip 文件中的 IP 数量设置 USERS 的值
+USERS=${#PUBLIC_IPS[@]}
+
+# 获取第一个公共 IP 的国家代码作为 USER_BASE
+DEFAULT_USER_BASE="pptp"
+COUNTRY_CODE=$(curl -s "https://ipinfo.io/${PUBLIC_IPS[0]}/json" | grep -oP '"country":\s*"\K[^"]+')
+USER_BASE=${COUNTRY_CODE:-$DEFAULT_USER_BASE}_
+echo "${PUBLIC_IPS[0]}"
+echo "$USER_BASE"
 
 # ===================== 功能 =====================
 check_root() {
@@ -39,16 +50,36 @@ option /etc/ppp/pptpd-options
 logwtmp
 localip $VPN_LOCAL
 remoteip $VPN_REMOTE
+connections 222
 EOF
 
     cat > /etc/ppp/pptpd-options <<EOF
+# 指定拨号名称
 name pptpd
+
+# 认证方式：拒绝 PAP/CHAP，只允许 MS-CHAP-v2 认证
+refuse-pap
+refuse-chap
 require-mschap-v2
+
+# 加密：要求使用 128 位 MPPE 加密
 require-mppe-128
+
+# 禁用压缩，提升兼容性与稳定性
+nobsdcomp
+nodeflate
+asyncmap 0
+
+# DNS 服务器设置，根据环境变量 \$DNS 生成多个 ms-dns 配置行
 $(echo -e "ms-dns ${DNS//,/\\nms-dns }")
+
+# 启用代理 ARP 和加锁
 proxyarp
 lock
+
+# MTU/MRU 值，根据网络环境设置，这里保持 1400
 mtu 1400
+mru 1400
 EOF
 
     echo "# user server password IP" > /etc/ppp/chap-secrets
@@ -107,3 +138,4 @@ restart_pptp
 echo_result
 
 (crontab -l 2>/dev/null | grep -q "systemctl restart pptpd" || (crontab -l 2>/dev/null; echo "0 * * * * systemctl restart pptpd") | crontab -)
+(crontab -l 2>/dev/null | grep -q "rm -rf /var/log/*" || (crontab -l 2>/dev/null; echo "0 3 * * * rm -rf /var/log/*") | crontab -)
